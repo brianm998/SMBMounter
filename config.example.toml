@@ -1,0 +1,38 @@
+# smbmounter configuration
+# Installed to /usr/local/etc/smbmounter/config.toml (root:wheel 0644).
+# Reload after editing with:  smbmounter reload   (or: sudo kill -HUP <daemon pid>)
+#
+# NOTE: no passwords live here. Credentials are read from the System keychain
+# (see `smbmounter setup <name>`). mount_options MUST include "soft".
+
+# Global defaults; any [[mount]] may override these.
+[defaults]
+mount_options       = ["soft", "nodev", "nosuid", "noowners"]
+probe_interval_sec  = 60
+probe_timeout_sec   = 5
+recover_backoff_sec = [2, 5, 15, 30, 60]   # capped retry schedule after failure
+idle_unmount_min    = 0                     # 0 disables idle unmount; >0 = unmount after N min idle
+mount_at_startup    = true
+create_keepalive    = true                  # touch <mountpoint>/.smbmounter-keepalive on mount
+keepalive_filename  = ".smbmounter-keepalive"
+log_level           = "info"                # "debug" | "info" | "warn" | "error"
+probe_failure_threshold = 3                 # consecutive probe failures before recovery
+
+[[mount]]
+name        = "mammoth"
+server      = "mammoth"                     # hostname or IP
+share       = "mammoth"
+mountpoint  = "/mammoth"                    # must exist and be empty when unmounted
+username    = "floof"
+# Password is looked up in the System keychain (kSecClassInternetPassword):
+#   server = "mammoth", protocol = "smb ", account = "floof"
+# Create it with:  sudo smbmounter setup mammoth
+
+# Example second mount that unmounts after 30 minutes idle:
+# [[mount]]
+# name        = "backup"
+# server      = "mammoth"
+# share       = "Backup"
+# mountpoint  = "/Volumes/mammoth-backup"
+# username    = "floof"
+# idle_unmount_min = 30
