@@ -36,7 +36,7 @@ Unmounted ──mount──▶ Mounting ──ok──▶ Mounted ──probe fa
     ▲                   │                │                              │
     │                   └──fail──▶ Failed◀──── backoff exhausted ───────┘
     │                                │
-    └──── idle unmount ◀── Mounted   └── network reachable / reload / `mount` ──▶ retry
+    └──── idle unmount ◀── Mounted   └── retry timer / network-reachable / reload / `mount` ──▶ retry
 ```
 
 Each supervisor runs a probe timer and an idle watcher on its own serial queue. A
@@ -162,6 +162,7 @@ mammoth    Mounted    /mammoth     //floof@mammoth/mammoth    0      2026-06-01 
 | `probe_timeout_sec` | `5` | wall-clock timeout for the probe `stat` |
 | `recover_backoff_sec` | `[2,5,15,30,60]` | capped retry schedule after a probe failure |
 | `probe_failure_threshold` | `3` | consecutive failures before declaring the mount dead |
+| `failed_retry_sec` | `30` | retry a `Failed` mount every N seconds (transient/network failures only — never auth/config); `0` disables. Heals the cold-boot race. |
 | `idle_unmount_min` | `0` | unmount after N minutes with no open files (`0` = never) |
 | `mount_at_startup` | `true` | mount when the daemon starts |
 | `create_keepalive` | `true` | touch `<mountpoint>/.smbmounter-keepalive` on mount |
@@ -201,8 +202,10 @@ left `Unmounted` for this reason are intentional; `smbmounter status` shows them
 - **"could not reach the daemon":** it isn't running. Check
   `sudo launchctl print system/com.brian.smbmounter` and the logs.
 - **A mount is `Failed`:** the credential is probably missing or wrong
-  (`sudo smbmounter setup <name>`), or the server is unreachable. It retries
-  automatically when the network becomes reachable, or run `smbmounter mount <name>`.
+  (`sudo smbmounter setup <name>`), or the server is unreachable. Transient
+  (network) failures retry automatically every `failed_retry_sec` and on a
+  network-reachable event; auth/config failures do **not** auto-retry (fix them,
+  then `smbmounter mount <name>`).
 - **Stale mount returns?** That's what the prober fixes — look for
   `entering recovery` / `recovery succeeded` lines in the log with timing.
 - **`/etc/nsmb.conf`:** the daemon assumes your stability-tuned `nsmb.conf`

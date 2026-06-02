@@ -32,6 +32,11 @@ struct Defaults {
     var logLevel: String            = "info"
     /// §7: a single probe failure is often a blip; require N in a row.
     var probeFailureThreshold: Int  = 3
+    /// Periodically retry a mount stuck in `Failed` from a *transient* cause
+    /// (e.g. the cold-boot race where the NAS link isn't up yet). Seconds; 0
+    /// disables (rely on reachability/SIGHUP/manual only). Auth failures are never
+    /// auto-retried regardless, to avoid hammering the server.
+    var failedRetrySec: Int         = 30
     /// Local user the mount should be owned by / accessible to. A root-mounted SMB
     /// share is only accessible to root (smbfs maps everything to the mounting
     /// user, mode 700); mounting as this user makes it readable by them — the way
@@ -57,6 +62,7 @@ struct MountConfig {
     var createKeepalive: Bool
     var keepaliveFilename: String
     var probeFailureThreshold: Int
+    var failedRetrySec: Int
     var localUser: String?
 
     var keepalivePath: String {
@@ -280,6 +286,7 @@ extension Config {
         if let v = t["keepalive_filename"]?.asString    { d.keepaliveFilename = v }
         if let v = t["log_level"]?.asString             { d.logLevel = v }
         if let v = t["probe_failure_threshold"]?.asInt  { d.probeFailureThreshold = v }
+        if let v = t["failed_retry_sec"]?.asInt         { d.failedRetrySec = v }
         if let v = t["local_user"]?.asString            { d.localUser = v }
         return d
     }
@@ -309,6 +316,7 @@ extension Config {
             createKeepalive: t["create_keepalive"]?.asBool ?? d.createKeepalive,
             keepaliveFilename: t["keepalive_filename"]?.asString ?? d.keepaliveFilename,
             probeFailureThreshold: t["probe_failure_threshold"]?.asInt ?? d.probeFailureThreshold,
+            failedRetrySec: t["failed_retry_sec"]?.asInt ?? d.failedRetrySec,
             localUser: t["local_user"]?.asString ?? d.localUser
         )
     }
@@ -377,6 +385,9 @@ extension Config {
             }
             if m.probeFailureThreshold < 1 {
                 throw ConfigError.validation("mount '\(m.name)': probe_failure_threshold must be >= 1")
+            }
+            if m.failedRetrySec < 0 {
+                throw ConfigError.validation("mount '\(m.name)': failed_retry_sec must be >= 0")
             }
             if m.recoverBackoffSec.isEmpty || m.recoverBackoffSec.contains(where: { $0 <= 0 }) {
                 throw ConfigError.validation("mount '\(m.name)': recover_backoff_sec must be a non-empty list of positive integers")

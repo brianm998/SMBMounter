@@ -9,6 +9,8 @@ final class MockMounter: MounterProtocol {
     private var mounted = false
 
     var shouldFailMount = false
+    var failMountsRemaining = 0      // fail this many calls, then start succeeding
+    var mountErrorToThrow: MounterError = .commandFailed(exit: 1, stderr: "mock failure")
     private(set) var mountCalls = 0
     private(set) var unmountCalls = 0
     private(set) var forceUnmountCalls = 0
@@ -17,10 +19,13 @@ final class MockMounter: MounterProtocol {
     func presetMounted() { lock.lock(); mounted = true; lock.unlock() }
 
     func mount(_ config: MountConfig) throws -> MountInfo {
-        lock.lock(); mountCalls += 1; lock.unlock()
-        if shouldFailMount {
-            throw MounterError.commandFailed(exit: 1, stderr: "mock failure")
-        }
+        lock.lock()
+        mountCalls += 1
+        let failNow = shouldFailMount || failMountsRemaining > 0
+        if failMountsRemaining > 0 { failMountsRemaining -= 1 }
+        let err = mountErrorToThrow
+        lock.unlock()
+        if failNow { throw err }
         lock.lock(); mounted = true; lock.unlock()
         return MountInfo(deviceID: 4242,
                          fromName: "//\(config.username)@\(config.server)/\(config.share)",
@@ -44,7 +49,7 @@ final class MockMounter: MounterProtocol {
 final class MountSupervisorTests: XCTestCase {
     /// Build a config that won't fire timers during the test (huge probe interval,
     /// idle disabled, no keepalive touch on a real filesystem).
-    private func makeConfig(name: String = "test", mountAtStartup: Bool = true) -> MountConfig {
+    private func makeConfig(name: String = "test", mountAtStartup: Bool = true, failedRetrySec: Int = 0) -> MountConfig {
         MountConfig(
             name: name,
             server: "mammoth",
@@ -60,6 +65,7 @@ final class MountSupervisorTests: XCTestCase {
             createKeepalive: false,
             keepaliveFilename: ".smbmounter-keepalive",
             probeFailureThreshold: 3,
+            failedRetrySec: failedRetrySec,
             localUser: nil
         )
     }
@@ -140,5 +146,33 @@ final class MountSupervisorTests: XCTestCase {
         wait(for: [settle], timeout: 2)
         XCTAssertEqual(sup.snapshot().state, "Unmounted")
         XCTAssertEqual(mock.mountCalls, 0)
+    }
+
+    /// A transient failure (e.g. the cold-boot network race) should auto-retry on
+    /// the failed-retry timer and recover once the mount starts succeeding.
+    func testTransientFailureRetriesUntilSuccess() {
+        let mock = MockMounter()
+        mock.failMountsRemaining = 1          // first attempt fails transiently, then succeeds
+        let sup = MountSupervisor(config: makeConfig(failedRetrySec: 1), mounter: mock)
+        sup.start()                            // mounts at startup → fails → schedules retry (1s)
+        let done = expectation(description: "recovered via retry")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2.5) { done.fulfill() }
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(sup.snapshot().state, "Mounted")
+        XCTAssertGreaterThanOrEqual(mock.mountCalls, 2)   // initial + at least one retry
+    }
+
+    /// An auth failure must NOT auto-retry (avoid hammering the server / lockout).
+    func testAuthFailureDoesNotRetry() {
+        let mock = MockMounter()
+        mock.shouldFailMount = true
+        mock.mountErrorToThrow = .netfs(rc: 80)   // EAUTH — non-transient
+        let sup = MountSupervisor(config: makeConfig(failedRetrySec: 1), mounter: mock)
+        sup.start()
+        let done = expectation(description: "settle")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2.5) { done.fulfill() }
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(sup.snapshot().state, "Failed")
+        XCTAssertEqual(mock.mountCalls, 1, "auth failures must not be retried")
     }
 }

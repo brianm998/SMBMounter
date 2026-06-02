@@ -39,6 +39,7 @@ final class MountSupervisor {
     private var keepaliveEnabled: Bool
     private var probeTimer: DispatchSourceTimer?
     private var idleTimer: DispatchSourceTimer?
+    private var failedRetryTimer: DispatchSourceTimer?
     private var stopped = false
 
     // ---- snapshot (guarded by its own lock) ----
@@ -182,6 +183,7 @@ final class MountSupervisor {
             mountInfo = info
             failureCount = 0
             transition(to: .mounted)
+            cancelFailedRetryTimer()
             maybeTouchKeepalive()
             startProbeTimer()
             startIdleTimer()
@@ -198,6 +200,7 @@ final class MountSupervisor {
             lastError = nil
             transition(to: .mounted)
             log.info("mounted \(config.mountpoint) from \(info.fromName)")
+            cancelFailedRetryTimer()
             maybeTouchKeepalive()
             startProbeTimer()
             startIdleTimer()
@@ -206,6 +209,7 @@ final class MountSupervisor {
             lastError = "\(error)"
             transition(to: .failed)
             log.error("mount failed: \(error)")
+            scheduleFailedRetryIfTransient(error)
             completion?(.failure(error))
         }
     }
@@ -297,7 +301,10 @@ final class MountSupervisor {
         guard recoveryAttempt < backoff.count else {
             lastError = "recovery exhausted after \(backoff.count) attempts"
             transition(to: .failed)
-            log.error("recovery exhausted for \(config.name); now Failed (awaiting external trigger)")
+            log.error("recovery exhausted for \(config.name); now Failed")
+            // Recovery exhaustion is a connectivity problem (transient) — keep
+            // retrying on the slow timer so it heals when the server returns.
+            startFailedRetryTimer()
             return
         }
         let delay = Double(backoff[recoveryAttempt])
@@ -322,6 +329,7 @@ final class MountSupervisor {
             transition(to: .mounted)
             let elapsed = recoveryStart.map { Date().timeIntervalSince($0) } ?? 0
             log.info("recovery succeeded for \(config.name) in \(String(format: "%.1f", elapsed))s (total recoveries: \(recoveryCount))")
+            cancelFailedRetryTimer()
             maybeTouchKeepalive()
             startProbeTimer()
             startIdleTimer()
@@ -415,5 +423,59 @@ final class MountSupervisor {
     private func cancelTimers() {
         cancelProbeTimer()
         cancelIdleTimer()
+        cancelFailedRetryTimer()
+    }
+
+    // MARK: Failed-state retry (cold-boot / transient-failure resilience)
+
+    /// Start the slow retry timer if the failure was transient. Auth/config
+    /// failures are NOT retried (a wrong password retried every N seconds could
+    /// trip the server's account lockout).
+    private func scheduleFailedRetryIfTransient(_ error: Error) {
+        if Self.isTransient(error) {
+            startFailedRetryTimer()
+        } else {
+            cancelFailedRetryTimer()
+            log.info("\(config.name): failure is not transient; not auto-retrying — fix it, then `smbmounter mount \(config.name)`")
+        }
+    }
+
+    /// Idempotent: starts a repeating timer that re-attempts the mount while in
+    /// Failed. No-op if disabled or already running.
+    private func startFailedRetryTimer() {
+        guard config.failedRetrySec > 0, failedRetryTimer == nil, !stopped else { return }
+        let interval = Double(config.failedRetrySec)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .seconds(2))
+        timer.setEventHandler { [weak self] in self?.retryFailedMount() }
+        failedRetryTimer = timer
+        timer.resume()
+        log.info("\(config.name): will retry the failed mount every \(config.failedRetrySec)s")
+    }
+
+    private func cancelFailedRetryTimer() {
+        failedRetryTimer?.cancel()
+        failedRetryTimer = nil
+    }
+
+    private func retryFailedMount() {
+        guard state == .failed, !stopped else { cancelFailedRetryTimer(); return }
+        log.info("\(config.name): retrying failed mount")
+        doMount(reason: "failed-retry", completion: nil)
+    }
+
+    /// Whether a mount failure is worth auto-retrying. Transient = network/IO;
+    /// non-transient = authentication or config (won't fix itself by retrying).
+    private static func isTransient(_ error: Error) -> Bool {
+        guard let e = error as? MounterError else { return true }
+        switch e {
+        case .netfs(let rc):
+            // 80=EAUTH, 13=EACCES: credential/permission — don't hammer the server.
+            return rc != 80 && rc != 13
+        case .noCredential, .unknownUser, .badURL:
+            return false
+        case .timedOut, .notMountedAfterCommand, .statFailed, .commandFailed:
+            return true
+        }
     }
 }

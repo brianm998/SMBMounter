@@ -17,6 +17,8 @@ create_keepalive    = true                  # touch <mountpoint>/.smbmounter-kee
 keepalive_filename  = ".smbmounter-keepalive"
 log_level           = "info"                # "debug" | "info" | "warn" | "error"
 probe_failure_threshold = 3                 # consecutive probe failures before recovery
+failed_retry_sec    = 30                     # retry a Failed mount every N sec (transient/network failures
+                                             # only — never auth); 0 disables. Heals the cold-boot race.
 
 # Mount the share AS this local user so it's accessible to them. A share mounted
 # by root (the default) is owned by root, mode 700 — other users get "Permission
