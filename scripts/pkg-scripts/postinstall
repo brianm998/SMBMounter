@@ -1,0 +1,27 @@
+#!/bin/bash
+# smbmounter .pkg postinstall.
+#
+#  * Seed config.toml from the shipped example on first install (never clobber an
+#    existing config — matches install.sh / `make install` behavior).
+#  * If the daemon is ALREADY loaded, restart it so an upgrade picks up the new
+#    binary. A fresh install is deliberately left unloaded: it has no usable
+#    config or keychain credential yet, so the user runs `smbmounter setup` and
+#    `launchctl bootstrap` themselves (see README).
+set -e
+
+LABEL="com.brian.smbmounter"
+ETC="/usr/local/etc/smbmounter"
+CONFIG="$ETC/config.toml"
+EXAMPLE="$ETC/config.example.toml"
+
+if [[ ! -f "$CONFIG" && -f "$EXAMPLE" ]]; then
+  cp "$EXAMPLE" "$CONFIG"
+  chown root:wheel "$CONFIG"
+  chmod 0644 "$CONFIG"
+fi
+
+if /bin/launchctl print "system/$LABEL" >/dev/null 2>&1; then
+  /bin/launchctl kickstart -k "system/$LABEL" || true
+fi
+
+exit 0

@@ -1,0 +1,47 @@
+name: CI
+
+# Fast build + test on every push and pull request. macOS-only by design:
+# smbmounter is a macOS LaunchDaemon (NetFS, launchd, smbfs) with no other
+# target platform. Release artifacts are produced by the separate Release
+# workflow (release.yml), not here.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel an in-flight run when a new commit is pushed to the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      # No external dependencies, so there is no Package.resolved; key the cache
+      # on Package.swift instead.
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: ci-spm-${{ runner.os }}-${{ hashFiles('Package.swift') }}
+          restore-keys: ci-spm-${{ runner.os }}-
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      # Catch release-only breakage (optimizer, dead-code, linker) on every commit
+      # so a tag push never hits a surprise in the Release workflow.
+      - name: Build (release)
+        run: swift build -c release

@@ -3,6 +3,7 @@
 # Targets:
 #   make build      compile the release binary
 #   make test       run the unit test suite
+#   make package    build a local (unsigned) .pkg + tarball into dist/
 #   make install    install binary, config (if absent), plist, log rotation  [sudo]
 #   make load       bootstrap the LaunchDaemon                                [sudo]
 #   make unload     bootout the LaunchDaemon                                  [sudo]
@@ -22,13 +23,19 @@ RELEASE_BIN := .build/release/smbmounter
 
 INSTALL := /usr/bin/install
 
-.PHONY: build test clean install load unload uninstall
+.PHONY: build test package clean install load unload uninstall
 
 build:
 	swift build -c release
 
 test:
 	swift test
+
+# Build the release artifacts locally (unsigned) for testing the Release
+# pipeline without tagging. CI runs the same script with signing args.
+# Override the version with: make package VERSION=1.2.3
+package:
+	./scripts/build-pkg.sh $(if $(VERSION),--version $(VERSION),) --out dist
 
 clean:
 	swift package clean

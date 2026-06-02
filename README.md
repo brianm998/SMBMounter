@@ -1,5 +1,7 @@
 # smbmounter
 
+[![CI](https://github.com/brianm998/SMBMounter/actions/workflows/ci.yml/badge.svg)](https://github.com/brianm998/SMBMounter/actions/workflows/ci.yml)
+
 A Swift command-line utility and `launchd` system daemon that **replaces `autofs`
 for SMB mounts** on macOS. It mounts your NAS shares, probes them for health, and
 **force-unmounts + remounts when a mount goes stale** — the failure mode where
@@ -72,11 +74,42 @@ mounted it.** This is enforced by `smbfs` at the session level; file-mode bits
 
 ```bash
 make build      # swift build -c release
-make test       # swift test  (29 unit tests; no network/NAS needed)
+make test       # swift test  (31 unit tests; no network/NAS needed)
 ```
 
 No external dependencies — the TOML config parser and CLI arg parsing are
 hand-rolled to keep a root daemon auditable and buildable offline.
+
+## Continuous integration & releases
+
+Two GitHub Actions workflows (macOS-only — there is no other target platform):
+
+- **CI** (`.github/workflows/ci.yml`) runs on every push / PR to `main` and
+  `develop`: `swift build`, `swift test`, and a release build.
+- **Release** (`.github/workflows/release.yml`) runs on a version **tag** push.
+  It builds the binary, produces a `.pkg` installer and a binary tarball, and
+  attaches them to a **draft** GitHub Release for review.
+
+To cut a release, bump `Constants.swift`'s `version`, commit, then tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0      # → builds, packages, opens a draft release
+```
+
+The release `.pkg` is **signed + notarized** when these repo secrets are set,
+and gracefully **unsigned** when they are not (handy for forks):
+`APPLE_CERTIFICATE_P12_BASE64`, `APPLE_CERTIFICATE_PASSWORD`,
+`KEYCHAIN_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_API_KEY_P8_BASE64`,
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`. The `.p12` must hold both a
+*Developer ID Application* identity (signs the binary) and a *Developer ID
+Installer* identity (signs the `.pkg`).
+
+Build the artifacts locally (unsigned) without tagging:
+
+```bash
+make package                # → dist/smbmounter-<version>.pkg + .tar.gz
+```
 
 ## Install
 
