@@ -22,7 +22,12 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "smbmounter",
-            path: "Sources/smbmounter"
+            path: "Sources/smbmounter",
+            linkerSettings: [
+                // NetFS provides NetFSMountURLSync — the keychain-aware SMB mount
+                // path (mount_smbfs the CLI does not read the keychain).
+                .linkedFramework("NetFS"),
+            ]
         ),
         .testTarget(
             name: "smbmounterTests",

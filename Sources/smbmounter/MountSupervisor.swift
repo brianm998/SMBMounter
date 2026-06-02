@@ -260,12 +260,23 @@ final class MountSupervisor {
     }
 
     private func runProbe(info: MountInfo) -> ProbeOutcome {
-        Prober.probe(
-            mountpoint: config.mountpoint,
+        // Probe the RESOLVED mountpoint (where the mount actually lives), not the
+        // configured path which may be a symlink (e.g. /mammoth).
+        let keepalive = keepaliveEnabled
+            ? (info.mountpoint as NSString).appendingPathComponent(config.keepaliveFilename)
+            : nil
+        return Prober.probe(
+            mountpoint: info.mountpoint,
             expectedDevice: info.deviceID,
-            keepalivePath: keepaliveEnabled ? config.keepalivePath : nil,
+            keepalivePath: keepalive,
             timeout: Double(config.probeTimeoutSec)
         )
+    }
+
+    /// Resolved mountpoint to operate on once mounted (falls back to the configured
+    /// path when we don't yet have a MountInfo).
+    private var activeMountpoint: String {
+        mountInfo?.mountpoint ?? config.mountpoint
     }
 
     // MARK: Recovery
@@ -338,7 +349,7 @@ final class MountSupervisor {
 
     private func checkIdle() {
         guard state == .mounted else { return }
-        switch IdleWatcher.hasOpenFiles(under: config.mountpoint, excludingPID: getpid()) {
+        switch IdleWatcher.hasOpenFiles(under: activeMountpoint, excludingPID: getpid()) {
         case .some(true):
             lastOpenSeen = Date()
             return
@@ -376,8 +387,8 @@ final class MountSupervisor {
     // MARK: Helpers
 
     private func maybeTouchKeepalive() {
-        guard config.createKeepalive else { return }
-        let path = config.keepalivePath
+        guard config.createKeepalive, let mp = mountInfo?.mountpoint else { return }
+        let path = (mp as NSString).appendingPathComponent(config.keepaliveFilename)
         let fd = open(path, O_CREAT | O_WRONLY | O_NOFOLLOW, 0o644)
         if fd < 0 {
             // Read-only share is legitimate — just disable keepalive probing here.

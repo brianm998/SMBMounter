@@ -109,8 +109,7 @@ enum CLI {
                 p1,
                 server: mount.server,
                 account: mount.username,
-                label: "smbmounter: \(mount.username)@\(mount.server)",
-                trustedPaths: [Constants.mountSMBFS, "/usr/local/sbin/smbmounter", CommandLine.arguments[0]]
+                label: "smbmounter: \(mount.username)@\(mount.server)"
             )
             print("Stored credential in the System keychain.")
             print("Trigger a mount with: smbmounter mount \(name)")

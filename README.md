@@ -43,11 +43,36 @@ Each supervisor runs a probe timer and an idle watcher on its own serial queue. 
 unix-domain control socket (`/var/run/smbmounter.sock`) speaks JSON-line RPC to the
 CLI.
 
+### How it mounts (and the multi-user caveat)
+
+The daemon mounts via the **NetFS framework** (`NetFSMountURLSync`), *not* the
+`mount_smbfs` CLI. The CLI doesn't read the Keychain (its `-N` flag reads a
+password from `nsmb.conf`, and it links no Security framework); the Keychain path
+lives in NetFS, which is what Finder and autofs use. The daemon reads the password
+from the System keychain itself (as root) and hands it to NetFS in memory, so the
+password never appears in `ps` or on a command line.
+
+**macOS limitation — a mounted SMB share is accessible only to the user who
+mounted it.** This is enforced by `smbfs` at the session level; file-mode bits
+(`noowners`, `dir_mode=0777`, …) do **not** override it. So:
+
+- If you set **`local_user`**, the daemon mounts *as that user*: it `chown`s the
+  mountpoint to them (macOS only lets a non-root user mount on a mountpoint they
+  own) and performs the mount via a small privilege-dropping helper, so the share
+  is owned by and readable by that user. This is effectively **required** for a
+  usable mount on a single-user Mac — set it to your login name.
+- Without `local_user` the mount is owned by root and only root can read it.
+- There is **no way** to make one eagerly-mounted SMB share readable by *all*
+  local users. autofs only appears multi-user because it mounts per-user,
+  on-access, behind one path — a mechanism this eager-mount daemon deliberately
+  does not implement. If you need every user on the machine to access the share,
+  this tool is not the right fit (keep autofs, or mount per-user).
+
 ## Build & test
 
 ```bash
 make build      # swift build -c release
-make test       # swift test  (28 unit tests; no network/NAS needed)
+make test       # swift test  (29 unit tests; no network/NAS needed)
 ```
 
 No external dependencies — the TOML config parser and CLI arg parsing are
@@ -131,7 +156,8 @@ mammoth    Mounted    /mammoth     //floof@mammoth/mammoth    0      2026-06-01 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mount_options` | `["soft","nodev","nosuid","noowners"]` | passed to `mount_smbfs -o`. **Must include `soft`.** |
+| `mount_options` | `["soft","nodev","nosuid","noowners"]` | mapped to NetFS mount flags (`nodev`/`nosuid`/`noowners`/`rdonly`/`nobrowse`). `soft` is enforced via NetFS `SoftMount` + your `/etc/nsmb.conf`. **Must include `soft`.** |
+| `local_user` | _(none)_ | mount as this local user so the share is accessible to them (see "How it mounts"). Unset = mount as root (root-only access). |
 | `probe_interval_sec` | `60` | seconds between health probes |
 | `probe_timeout_sec` | `5` | wall-clock timeout for the probe `stat` |
 | `recover_backoff_sec` | `[2,5,15,30,60]` | capped retry schedule after a probe failure |
@@ -182,9 +208,10 @@ left `Unmounted` for this reason are intentional; `smbmounter status` shows them
 - **`/etc/nsmb.conf`:** the daemon assumes your stability-tuned `nsmb.conf`
   (`soft=yes`, `notify_off=yes`, `dir_cache_off=yes`, …) is in place. It does
   **not** touch it.
-- **firmlinks:** if `/mammoth` is a firmlink, `mount_smbfs` mounts at
-  `/System/Volumes/Data/mammoth` transparently. Either path works as `mountpoint`;
-  use whichever the firmlink expects (`readlink /mammoth`, `cat /usr/share/firmlinks`).
+- **symlink/firmlink mountpoints:** if `/mammoth` is a symlink (e.g. →
+  `/System/Volumes/Data/mammoth`), the daemon resolves it with `realpath` and mounts
+  at the real target (NetFS refuses to mount onto a symlinked path). You can put
+  either path in `mountpoint`; check with `readlink /mammoth`.
 
 ## Migration from autofs
 

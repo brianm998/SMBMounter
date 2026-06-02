@@ -13,13 +13,13 @@ final class MounterTests: XCTestCase {
         XCTAssertEqual(Mounter.percentEncode("user@host"), "user%40host")
     }
 
-    func testSMBURLPlain() {
-        XCTAssertEqual(Mounter.smbURL(user: "floof", server: "mammoth", share: "mammoth"),
-                       "//floof@mammoth/mammoth")
+    func testNetfsURLPlain() {
+        XCTAssertEqual(Mounter.netfsURL(server: "mammoth.local", share: "mammoth")?.absoluteString,
+                       "smb://mammoth.local/mammoth")
     }
 
-    func testSMBURLEncodesUserAndShareButNotServer() {
-        XCTAssertEqual(Mounter.smbURL(user: "floof", server: "192.168.1.10", share: "My Share"),
-                       "//floof@192.168.1.10/My%20Share")
+    func testNetfsURLEncodesShare() {
+        XCTAssertEqual(Mounter.netfsURL(server: "192.168.1.10", share: "My Share")?.absoluteString,
+                       "smb://192.168.1.10/My%20Share")
     }
 }

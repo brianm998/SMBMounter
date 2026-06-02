@@ -22,7 +22,9 @@ final class MockMounter: MounterProtocol {
             throw MounterError.commandFailed(exit: 1, stderr: "mock failure")
         }
         lock.lock(); mounted = true; lock.unlock()
-        return MountInfo(deviceID: 4242, fromName: "//\(config.username)@\(config.server)/\(config.share)")
+        return MountInfo(deviceID: 4242,
+                         fromName: "//\(config.username)@\(config.server)/\(config.share)",
+                         mountpoint: config.mountpoint)
     }
 
     func unmount(mountpoint: String, force: Bool) throws {
@@ -35,7 +37,7 @@ final class MockMounter: MounterProtocol {
 
     func currentMountInfo(mountpoint: String) -> MountInfo? {
         lock.lock(); defer { lock.unlock() }
-        return mounted ? MountInfo(deviceID: 4242, fromName: "//mock") : nil
+        return mounted ? MountInfo(deviceID: 4242, fromName: "//mock", mountpoint: mountpoint) : nil
     }
 }
 
@@ -57,7 +59,8 @@ final class MountSupervisorTests: XCTestCase {
             mountAtStartup: mountAtStartup,
             createKeepalive: false,
             keepaliveFilename: ".smbmounter-keepalive",
-            probeFailureThreshold: 3
+            probeFailureThreshold: 3,
+            localUser: nil
         )
     }
 

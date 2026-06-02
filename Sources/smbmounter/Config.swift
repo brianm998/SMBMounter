@@ -32,6 +32,11 @@ struct Defaults {
     var logLevel: String            = "info"
     /// §7: a single probe failure is often a blip; require N in a row.
     var probeFailureThreshold: Int  = 3
+    /// Local user the mount should be owned by / accessible to. A root-mounted SMB
+    /// share is only accessible to root (smbfs maps everything to the mounting
+    /// user, mode 700); mounting as this user makes it readable by them — the way
+    /// autofs behaved. nil = mount as root.
+    var localUser: String?          = nil
 }
 
 /// A single managed mount, with defaults already merged in (so every field is
@@ -52,6 +57,7 @@ struct MountConfig {
     var createKeepalive: Bool
     var keepaliveFilename: String
     var probeFailureThreshold: Int
+    var localUser: String?
 
     var keepalivePath: String {
         let base = mountpoint.hasSuffix("/") ? String(mountpoint.dropLast()) : mountpoint
@@ -274,6 +280,7 @@ extension Config {
         if let v = t["keepalive_filename"]?.asString    { d.keepaliveFilename = v }
         if let v = t["log_level"]?.asString             { d.logLevel = v }
         if let v = t["probe_failure_threshold"]?.asInt  { d.probeFailureThreshold = v }
+        if let v = t["local_user"]?.asString            { d.localUser = v }
         return d
     }
 
@@ -301,7 +308,8 @@ extension Config {
             mountAtStartup: t["mount_at_startup"]?.asBool ?? d.mountAtStartup,
             createKeepalive: t["create_keepalive"]?.asBool ?? d.createKeepalive,
             keepaliveFilename: t["keepalive_filename"]?.asString ?? d.keepaliveFilename,
-            probeFailureThreshold: t["probe_failure_threshold"]?.asInt ?? d.probeFailureThreshold
+            probeFailureThreshold: t["probe_failure_threshold"]?.asInt ?? d.probeFailureThreshold,
+            localUser: t["local_user"]?.asString ?? d.localUser
         )
     }
 }

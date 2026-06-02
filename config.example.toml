@@ -18,6 +18,11 @@ keepalive_filename  = ".smbmounter-keepalive"
 log_level           = "info"                # "debug" | "info" | "warn" | "error"
 probe_failure_threshold = 3                 # consecutive probe failures before recovery
 
+# Mount the share AS this local user so it's accessible to them. A share mounted
+# by root (the default) is owned by root, mode 700 — other users get "Permission
+# denied" (smbfs ignores `noowners` for this). Set this to your login user.
+# local_user          = "yourusername"
+
 [[mount]]
 name        = "mammoth"
 server      = "mammoth"                     # hostname or IP

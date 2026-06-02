@@ -63,6 +63,10 @@ case "daemon":
     let (configPath, _) = extractConfigPath(Array(arguments.dropFirst()))
     Daemon(configPath: configPath).run()   // never returns
 
+case "__mount-helper":
+    // Internal: the root daemon re-execs this to mount as a dropped-privilege user.
+    runMountHelper(Array(arguments.dropFirst()))   // never returns
+
 case "status":
     exit(CLI.status())
 
