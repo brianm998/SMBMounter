@@ -38,7 +38,6 @@ final class MountSupervisor {
     private var recoveryCount = 0
     private var lastOpenSeen = Date()
     private var lastError: String?
-    private var keepaliveEnabled: Bool
     private var probeTimer: DispatchSourceTimer?
     private var idleTimer: DispatchSourceTimer?
     private var failedRetryTimer: DispatchSourceTimer?
@@ -53,7 +52,6 @@ final class MountSupervisor {
         self.mounter = mounter
         self.log = Log(category: "mount:\(config.name)")
         self.queue = DispatchQueue(label: "com.brian.smbmounter.mount.\(config.name)")
-        self.keepaliveEnabled = config.createKeepalive
         self.snap = MountStatusDTO(
             name: config.name,
             state: State.unmounted.rawValue,
@@ -100,7 +98,7 @@ final class MountSupervisor {
     func requestProbeNow(completion: @escaping (ProbeOutcome) -> Void) {
         queue.async {
             guard self.state == .mounted, let info = self.mountInfo else {
-                completion(.fail(reason: "mount is in state \(self.state.rawValue)", errnoValue: nil))
+                completion(.fail(reason: "mount is in state \(self.state.rawValue)", errnoValue: nil, definite: false))
                 return
             }
             completion(self.runProbe(info: info))
@@ -122,7 +120,6 @@ final class MountSupervisor {
         queue.async {
             let wasMounted = self.state == .mounted
             self.config = newConfig
-            self.keepaliveEnabled = newConfig.createKeepalive
             self.snapLock.lock()
             self.snap.server = newConfig.server
             self.snap.share = newConfig.share
@@ -186,7 +183,6 @@ final class MountSupervisor {
             failureCount = 0
             transition(to: .mounted)
             cancelFailedRetryTimer()
-            maybeTouchKeepalive()
             startProbeTimer()
             startIdleTimer()
             completion?(.success(()))
@@ -203,7 +199,6 @@ final class MountSupervisor {
             transition(to: .mounted)
             log.info("mounted \(config.mountpoint) from \(info.fromName)")
             cancelFailedRetryTimer()
-            maybeTouchKeepalive()
             startProbeTimer()
             startIdleTimer()
             completion?(.success(()))
@@ -251,15 +246,18 @@ final class MountSupervisor {
 
     private func doProbe() {
         guard state == .mounted, let info = mountInfo else { return }
-        let outcome = runProbe(info: info)
-        switch outcome {
+        switch runProbe(info: info) {
         case .ok:
             if failureCount != 0 { log.debug("probe recovered after \(failureCount) failure(s)") }
             failureCount = 0
-        case .fail(let reason, let errnoValue):
+        case .fail(let reason, let errnoValue, let definite):
             failureCount += 1
             log.warn("probe failure \(failureCount)/\(config.probeFailureThreshold): \(reason)\(errnoValue.map { " (errno \($0))" } ?? "")")
-            if failureCount >= config.probeFailureThreshold {
+            // A definite signal (reverted to local fs, dead-connection errno) means
+            // the share is already gone — recover now instead of waiting out the
+            // threshold (that ~3-probe delay was the multi-minute blackout).
+            if definite || failureCount >= config.probeFailureThreshold {
+                if definite { log.warn("\(config.name): mount is gone — recovering immediately") }
                 beginRecovery()
             }
         }
@@ -268,13 +266,17 @@ final class MountSupervisor {
     private func runProbe(info: MountInfo) -> ProbeOutcome {
         // Probe the RESOLVED mountpoint (where the mount actually lives), not the
         // configured path which may be a symlink (e.g. /mammoth).
-        let keepalive = keepaliveEnabled
-            ? (info.mountpoint as NSString).appendingPathComponent(config.keepaliveFilename)
-            : nil
+        //
+        // NOTE: there is deliberately no keepalive write here. A keepalive must
+        // write to the share, but smbfs binds a `local_user` mount to that user's
+        // *login session* — a root daemon, even setuid'd to that user, runs in the
+        // system session and is denied (confirmed in the field). So the daemon
+        // cannot keep the session warm; only a process inside the user's login
+        // session (a LaunchAgent) could, which we don't ship. The device-id check
+        // below still reliably detects a vanished mount from the daemon.
         return Prober.probe(
             mountpoint: info.mountpoint,
             expectedDevice: info.deviceID,
-            keepalivePath: keepalive,
             timeout: Double(config.probeTimeoutSec)
         )
     }
@@ -332,7 +334,6 @@ final class MountSupervisor {
             let elapsed = recoveryStart.map { Date().timeIntervalSince($0) } ?? 0
             log.info("recovery succeeded for \(config.name) in \(String(format: "%.1f", elapsed))s (total recoveries: \(recoveryCount))")
             cancelFailedRetryTimer()
-            maybeTouchKeepalive()
             startProbeTimer()
             startIdleTimer()
         } catch {
@@ -395,22 +396,6 @@ final class MountSupervisor {
     }
 
     // MARK: Helpers
-
-    private func maybeTouchKeepalive() {
-        guard config.createKeepalive, let mp = mountInfo?.mountpoint else { return }
-        let path = (mp as NSString).appendingPathComponent(config.keepaliveFilename)
-        let fd = open(path, O_CREAT | O_WRONLY | O_NOFOLLOW, 0o644)
-        if fd < 0 {
-            // Read-only share is legitimate — just disable keepalive probing here.
-            log.info("keepalive touch failed (\(String(cString: strerror(errno)))); disabling keepalive-file probing for \(config.name)")
-            keepaliveEnabled = false
-            return
-        }
-        futimens(fd, nil)   // bump mtime to now
-        close(fd)
-        keepaliveEnabled = true
-        log.debug("touched keepalive \(path)")
-    }
 
     private func cancelProbeTimer() {
         probeTimer?.cancel()

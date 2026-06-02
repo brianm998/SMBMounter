@@ -13,7 +13,8 @@ probe_timeout_sec   = 5
 recover_backoff_sec = [2, 5, 15, 30, 60]   # capped retry schedule after failure
 idle_unmount_min    = 0                     # 0 disables idle unmount; >0 = unmount after N min idle
 mount_at_startup    = true
-create_keepalive    = true                  # touch <mountpoint>/.smbmounter-keepalive on mount
+create_keepalive    = true                  # reserved (see README "Keepalive limitation"): the daemon can't
+                                             # keep a session-bound mount warm, so this currently has no effect
 keepalive_filename  = ".smbmounter-keepalive"
 log_level           = "info"                # "debug" | "info" | "warn" | "error"
 probe_failure_threshold = 3                 # consecutive probe failures before recovery

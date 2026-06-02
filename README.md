@@ -21,9 +21,15 @@ daemon does that automatically and on purpose:
 - **`-o soft` always.** Stuck I/O returns errors quickly instead of hanging
   processes forever. This is enforced — the daemon refuses to start a mount
   without `soft`.
-- **Periodic health probe.** A timeout-bounded `stat` of the mountpoint (and an
-  optional keepalive file, to force a real SMB roundtrip). Three consecutive
-  failures → force-unmount and remount with capped backoff.
+- **Periodic health probe.** A timeout-bounded `stat` of the mountpoint plus a
+  device-id check detects a mount that has dropped. (A keepalive that *writes* to
+  the share to keep the session warm can't run from the daemon — see [Keepalive
+  limitation](#keepalive-limitation) — so the probe relies on the device-id check
+  rather than generating SMB traffic.)
+- **Fast, targeted recovery.** A mount that has clearly vanished (reverted to the
+  local fs, or a dead-connection error) is force-unmounted and remounted
+  *immediately*; ambiguous failures (a single slow `stat`) wait for three strikes
+  first. Recovery retries on a capped backoff.
 - **No autofs.** No `/etc/auto_master` / `auto_smb` entries. The daemon never
   calls `automount`.
 - **Credentials via the System keychain.** No passwords in config, `ps`, or logs.
@@ -70,11 +76,27 @@ mounted it.** This is enforced by `smbfs` at the session level; file-mode bits
   does not implement. If you need every user on the machine to access the share,
   this tool is not the right fit (keep autofs, or mount per-user).
 
+### Keepalive limitation
+
+A keepalive would periodically write a small file to the share so the SMB session
+doesn't go idle and get disconnected. **The daemon can't do this for a
+`local_user` mount.** smbfs binds the share to the mounting user's *login
+session*, so even the root daemon `setuid`'d to that user — running in the system
+session — is denied (the same wall that stops `root` from reading the share;
+confirmed in the field: the touch succeeds from the user's session but is denied
+from the daemon's). So the daemon does **not** try to keep the session warm;
+instead it relies on the device-id probe plus **fast recovery** — an idle/dropped
+mount is detected and remounted within seconds. On a stable network the session
+rarely idles out anyway. If your server aggressively disconnects idle SMB sessions
+and you want to *prevent* the drop, run a keepalive from a per-user **LaunchAgent**
+(e.g. `touch <mountpoint>/.smbmounter-keepalive` every minute) — it executes
+inside your login session and so is allowed to write.
+
 ## Build & test
 
 ```bash
 make build      # swift build -c release
-make test       # swift test  (31 unit tests; no network/NAS needed)
+make test       # swift test  (32 unit tests; no network/NAS needed)
 ```
 
 No external dependencies — the TOML config parser and CLI arg parsing are
@@ -194,11 +216,11 @@ mammoth    Mounted    /mammoth     //floof@mammoth/mammoth    0      2026-06-01 
 | `probe_interval_sec` | `60` | seconds between health probes |
 | `probe_timeout_sec` | `5` | wall-clock timeout for the probe `stat` |
 | `recover_backoff_sec` | `[2,5,15,30,60]` | capped retry schedule after a probe failure |
-| `probe_failure_threshold` | `3` | consecutive failures before declaring the mount dead |
+| `probe_failure_threshold` | `3` | consecutive *ambiguous* failures (e.g. a slow `stat`) before recovery. A *definite* failure — mount reverted to local fs, or a dead-connection error — recovers immediately, ignoring this count. |
 | `failed_retry_sec` | `30` | retry a `Failed` mount every N seconds (transient/network failures only — never auth/config); `0` disables. Heals the cold-boot race. |
 | `idle_unmount_min` | `0` | unmount after N minutes with no open files (`0` = never) |
 | `mount_at_startup` | `true` | mount when the daemon starts |
-| `create_keepalive` | `true` | touch `<mountpoint>/.smbmounter-keepalive` on mount |
+| `create_keepalive` | `true` | reserved — see [Keepalive limitation](#keepalive-limitation). Currently inert: the daemon can't keep a session-bound mount warm. |
 | `keepalive_filename` | `.smbmounter-keepalive` | name of that file |
 | `log_level` | `info` | `debug` \| `info` \| `warn` \| `error` |
 

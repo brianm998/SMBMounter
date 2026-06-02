@@ -12,7 +12,11 @@ enum ProbeError: Error {
 /// user wants when investigating "did it wedge again?" (§7).
 enum ProbeOutcome {
     case ok
-    case fail(reason: String, errnoValue: Int32?)
+    /// `definite` = the mount is provably gone/dead right now (it reverted to the
+    /// local fs, or a connectivity errno) → recover immediately rather than wait
+    /// for the failure threshold. A single timeout leaves it false so the
+    /// consecutive-failure rule still smooths over transient slowness.
+    case fail(reason: String, errnoValue: Int32?, definite: Bool)
 
     var isOK: Bool { if case .ok = self { return true }; return false }
 }
@@ -47,45 +51,45 @@ enum Prober {
         return box.result
     }
 
-    /// Full probe of a mounted share.
+    /// Health check of a mounted share.
     ///
-    /// 1. Timeout-bounded stat of the mountpoint; any failure/timeout → FAIL.
+    /// 1. Timeout-bounded stat of the mountpoint. A timeout / generic errno is a
+    ///    transient FAIL (the consecutive-failure threshold smooths it over); a
+    ///    connectivity errno (ENOTCONN/ESTALE/…) is a *definite* FAIL.
     /// 2. st_dev must still match the device captured at mount time, else the
-    ///    mountpoint reverted to local fs → FAIL.
-    /// 3. If a keepalive path is given, stat it too. A bare directory stat can be
-    ///    served from cache; touching the keepalive file forces a real SMB
-    ///    roundtrip.
+    ///    mountpoint reverted to the local fs → *definite* FAIL.
+    ///
+    /// The keepalive roundtrip (which forces real SMB traffic and must run as the
+    /// mounting user) is performed by the Mounter, not here — a bare mountpoint
+    /// stat can be served from the VFS cache without touching the server.
     static func probe(mountpoint: String,
                       expectedDevice: dev_t,
-                      keepalivePath: String?,
                       timeout: TimeInterval) -> ProbeOutcome {
         switch statWithTimeout(mountpoint, timeout: timeout) {
         case .failure(.timedOut):
-            return .fail(reason: "stat(\(mountpoint)) timed out after \(Int(timeout))s", errnoValue: nil)
+            return .fail(reason: "stat(\(mountpoint)) timed out after \(Int(timeout))s",
+                         errnoValue: nil, definite: false)
         case .failure(.errno(let e)):
-            return .fail(reason: "stat(\(mountpoint)) failed: \(String(cString: strerror(e)))", errnoValue: e)
+            return .fail(reason: "stat(\(mountpoint)) failed: \(String(cString: strerror(e)))",
+                         errnoValue: e, definite: isDeadMountErrno(e))
         case .success(let st):
             if st.st_dev != expectedDevice {
-                return .fail(reason: "device id changed (\(expectedDevice) -> \(st.st_dev)); mountpoint reverted to local fs", errnoValue: nil)
-            }
-        }
-
-        if let keepalive = keepalivePath {
-            switch statWithTimeout(keepalive, timeout: timeout) {
-            case .failure(.timedOut):
-                return .fail(reason: "stat(keepalive) timed out after \(Int(timeout))s", errnoValue: nil)
-            case .failure(.errno(let e)):
-                // ENOENT here means the file is gone but the SMB roundtrip itself
-                // succeeded — that's not a connectivity failure. Connectivity
-                // errnos (ENOTCONN/ETIMEDOUT/ESTALE) are real failures.
-                if e == ENOENT {
-                    return .ok
-                }
-                return .fail(reason: "stat(keepalive) failed: \(String(cString: strerror(e)))", errnoValue: e)
-            case .success:
-                return .ok
+                return .fail(reason: "device id changed (\(expectedDevice) -> \(st.st_dev)); mountpoint reverted to local fs",
+                             errnoValue: nil, definite: true)
             }
         }
         return .ok
+    }
+
+    /// errnos that mean the mount/connection is gone — recover now, don't wait for
+    /// the failure threshold. Shared with the Mounter's keepalive classifier.
+    static func isDeadMountErrno(_ e: Int32) -> Bool {
+        switch e {
+        case ENOTCONN, ENXIO, ENODEV, ESTALE, EHOSTDOWN, EHOSTUNREACH,
+             ECONNRESET, ECONNABORTED, ENETDOWN, ENETUNREACH, EPIPE, ETIMEDOUT:
+            return true
+        default:
+            return false
+        }
     }
 }

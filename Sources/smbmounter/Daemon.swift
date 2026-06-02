@@ -210,14 +210,14 @@ final class Daemon: DaemonControl {
     func controlProbe(name: String) -> RPCResponse {
         guard let sup = supervisor(named: name) else { return .failure("no such mount: \(name)") }
         let sem = DispatchSemaphore(value: 0)
-        var outcome: ProbeOutcome = .fail(reason: "timed out", errnoValue: nil)
+        var outcome: ProbeOutcome = .fail(reason: "timed out", errnoValue: nil, definite: false)
         sup.requestProbeNow { outcome = $0; sem.signal() }
         if sem.wait(timeout: .now() + 30) == .timedOut {
             return .failure("probe timed out")
         }
         switch outcome {
         case .ok: return .success("probe OK for \(name)")
-        case .fail(let reason, _): return .failure("probe FAILED for \(name): \(reason)")
+        case .fail(let reason, _, _): return .failure("probe FAILED for \(name): \(reason)")
         }
     }
 
