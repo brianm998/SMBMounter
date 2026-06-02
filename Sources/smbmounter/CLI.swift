@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Client-side subcommands. The control ops talk JSON-line RPC to the daemon over

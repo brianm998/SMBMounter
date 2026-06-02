@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Hidden `__mount-helper` subcommand. The root daemon re-execs itself as this

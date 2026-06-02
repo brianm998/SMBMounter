@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// The `daemon` subcommand: owns one MountSupervisor per configured mount, the

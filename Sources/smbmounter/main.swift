@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 // Entry point. Hand-rolled subcommand dispatch (no external arg-parser dependency

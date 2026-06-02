@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Foundation
 
 /// Unix-domain control socket server (§11). Listens on `/var/run/smbmounter.sock`,
