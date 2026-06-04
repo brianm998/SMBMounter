@@ -85,7 +85,9 @@ final class MountSupervisor {
 
     func requestUnmount(force: Bool, completion: @escaping (Result<Void, Error>) -> Void) {
         queue.async {
-            if self.state == .unmounted || self.mounter.currentMountInfo(mountpoint: self.config.mountpoint) == nil {
+            // Non-blocking existence check (getmntinfo): never stat the mountpoint
+            // here, or a wedged share would hang the unmount request itself.
+            if self.state == .unmounted || !self.mounter.isMounted(mountpoint: self.config.mountpoint) {
                 self.cancelTimers()
                 self.transition(to: .unmounted)
                 completion(.success(()))
@@ -139,7 +141,7 @@ final class MountSupervisor {
         queue.async {
             self.stopped = true
             self.cancelTimers()
-            if unmount && self.mounter.currentMountInfo(mountpoint: self.config.mountpoint) != nil {
+            if unmount && self.mounter.isMounted(mountpoint: self.config.mountpoint) {
                 do {
                     try self.mounter.unmount(mountpoint: self.config.mountpoint, force: false)
                     self.log.info("unmounted \(self.config.name) on shutdown")
@@ -176,7 +178,8 @@ final class MountSupervisor {
             completion?(.success(()))
             return
         }
-        // Already mounted out-of-band (e.g. survived a crash + launchd restart)?
+        // Already mounted out-of-band and healthy (e.g. survived a crash + launchd
+        // restart)? Adopt it.
         if let info = mounter.currentMountInfo(mountpoint: config.mountpoint) {
             log.info("\(config.name) already mounted (\(info.fromName)); adopting")
             mountInfo = info
@@ -187,6 +190,22 @@ final class MountSupervisor {
             startIdleTimer()
             completion?(.success(()))
             return
+        }
+        // In the table but no healthy baseline → a stale/wedged mount occupies the
+        // mountpoint. Clear it first; mounting onto an occupied path would just hang
+        // (now bounded, but still wasted). If it can't be cleared, fail fast and let
+        // the slow retry timer heal it after the wedge clears (or a reboot).
+        if mounter.isMounted(mountpoint: config.mountpoint) {
+            log.warn("\(config.name): a stale/unresponsive mount occupies \(config.mountpoint); force-unmounting before remount")
+            if !mounter.forceUnmount(mountpoint: config.mountpoint) {
+                let msg = "an unresponsive mount is stuck on \(config.mountpoint) and could not be force-unmounted (the kernel mount may be wedged — a reboot may be required)"
+                lastError = msg
+                transition(to: .failed)
+                log.error("\(config.name): \(msg)")
+                scheduleFailedRetryIfTransient(MounterError.timedOut)
+                completion?(.failure(OpError(msg)))
+                return
+            }
         }
 
         transition(to: .mounting)
@@ -321,8 +340,15 @@ final class MountSupervisor {
     private func attemptRecoveryMount() {
         guard state == .recovering, !stopped else { return }
         log.info("recovery attempt \(recoveryAttempt + 1)/\(config.recoverBackoffSec.count) for \(config.name)")
-        if mounter.currentMountInfo(mountpoint: config.mountpoint) != nil {
-            mounter.forceUnmount(mountpoint: config.mountpoint)
+        // Make sure the path is actually clear before remounting. If the wedged
+        // mount survives the force-unmount, do NOT attempt a NetFS mount onto it
+        // (that's the call that hangs) — back off and try the whole cycle again.
+        if mounter.isMounted(mountpoint: config.mountpoint),
+           !mounter.forceUnmount(mountpoint: config.mountpoint) {
+            log.warn("\(config.name): could not clear the wedged mount; backing off before retrying")
+            recoveryAttempt += 1
+            scheduleRecoveryAttempt()
+            return
         }
         do {
             let info = try mounter.mount(config)

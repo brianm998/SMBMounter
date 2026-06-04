@@ -64,8 +64,16 @@ enum MounterError: Error, CustomStringConvertible {
 protocol MounterProtocol {
     func mount(_ config: MountConfig) throws -> MountInfo
     func unmount(mountpoint: String, force: Bool) throws
-    func forceUnmount(mountpoint: String)
+    /// Force-unmount and report whether the mountpoint is actually clear afterward.
+    /// Recovery relies on this: it must NOT attempt a fresh NetFS mount onto a path
+    /// that still has a wedged mount (that call would just hang).
+    @discardableResult func forceUnmount(mountpoint: String) -> Bool
     func currentMountInfo(mountpoint: String) -> MountInfo?
+    /// Non-blocking "is anything mounted here?" (getmntinfo only — never stats the
+    /// mountpoint, so it can't hang on a wedged share). Use this for existence
+    /// checks on the supervisor's serial queue; use `currentMountInfo` only when a
+    /// live device-id baseline is actually needed.
+    func isMounted(mountpoint: String) -> Bool
 }
 
 /// Real implementation.
@@ -117,8 +125,14 @@ struct Mounter: MounterProtocol {
                                       smbUser: config.username, password: password, flags: flags)
         } else {
             log.info("NetFS mount \(url.absoluteString) -> \(real) as \(config.username) (root-owned)")
-            rc = NetFSMount.mount(urlString: url.absoluteString, mountpoint: real,
-                                  user: config.username, password: password, mountFlags: flags)
+            guard let result = Self.netfsMountWithTimeout(
+                urlString: url.absoluteString, mountpoint: real,
+                user: config.username, password: password, flags: flags,
+                timeout: Constants.mountCommandTimeoutSec) else {
+                log.error("NetFS mount of \(real) exceeded \(Int(Constants.mountCommandTimeoutSec))s; abandoning (the worker unwedges via the soft mount)")
+                throw MounterError.timedOut
+            }
+            rc = result
         }
         if rc != 0 { throw MounterError.netfs(rc: rc) }
 
@@ -126,11 +140,37 @@ struct Mounter: MounterProtocol {
         guard let entry = MountTable.entry(forMountpoint: real) else {
             throw MounterError.notMountedAfterCommand
         }
-        var st = stat()
-        if stat(real, &st) != 0 {
-            throw MounterError.statFailed(errno: errno)
+        // Capture the device-id baseline with a bounded stat: a mount that wedges
+        // the instant it appears must not hang us here either.
+        switch Prober.statWithTimeout(real, timeout: Constants.statTimeoutSec) {
+        case .success(let st):
+            return MountInfo(deviceID: st.st_dev, fromName: entry.fromName, mountpoint: real)
+        case .failure(.errno(let e)):
+            throw MounterError.statFailed(errno: e)
+        case .failure(.timedOut):
+            throw MounterError.timedOut
         }
-        return MountInfo(deviceID: st.st_dev, fromName: entry.fromName, mountpoint: real)
+    }
+
+    /// `NetFSMountURLSync` (root-owned path) with a wall-clock watchdog. On timeout
+    /// the worker thread is abandoned — it's blocked in a `soft` mount that returns
+    /// an error on its own — and we report a timeout rather than wedging the
+    /// caller's (supervisor) serial queue. Mirrors `Prober.statWithTimeout`.
+    /// Returns nil iff it timed out.
+    private static func netfsMountWithTimeout(urlString: String, mountpoint: String,
+                                              user: String, password: String,
+                                              flags: Int32, timeout: TimeInterval) -> Int32? {
+        let sem = DispatchSemaphore(value: 0)
+        final class Box { var rc: Int32 = -1 }
+        let box = Box()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let rc = NetFSMount.mount(urlString: urlString, mountpoint: mountpoint,
+                                      user: user, password: password, mountFlags: flags)
+            box.rc = rc
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + timeout) == .timedOut { return nil }
+        return box.rc
     }
 
     /// Perform the NetFS mount as `uid`/`gid` by re-exec'ing the `__mount-helper`
@@ -156,12 +196,41 @@ struct Mounter: MounterProtocol {
         do { try process.run() }
         catch { throw MounterError.commandFailed(exit: -1, stderr: "mount helper spawn failed: \(error)") }
 
+        // Drain stdout/stderr on background queues. If the child wedges inside
+        // NetFSMountURLSync it never writes `rc=` nor closes the pipe, so a
+        // synchronous read here would block forever — the original hang.
+        var outData = Data(), errData = Data()
+        let ioGroup = DispatchGroup()
+        let ioQueue = DispatchQueue(label: "com.brian.smbmounter.mounthelper.io", attributes: .concurrent)
+        ioQueue.async(group: ioGroup) { outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile() }
+        ioQueue.async(group: ioGroup) { errData = stderrPipe.fileHandleForReading.readDataToEndOfFile() }
+
         try? stdinPipe.fileHandleForWriting.write(contentsOf: Data((password + "\n").utf8))
         try? stdinPipe.fileHandleForWriting.close()
 
-        let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        // Watchdog (mirrors Proc.run): SIGTERM at the deadline, SIGKILL shortly
+        // after. Without this, a child stuck in a wedged SMB mount pins the
+        // supervisor's serial queue forever — the bug this guards against.
+        let timedOut = AtomicFlag()
+        let pid = process.processIdentifier
+        let terminate = DispatchWorkItem {
+            if process.isRunning {
+                timedOut.set()
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                    if process.isRunning { kill(pid, SIGKILL) }
+                }
+            }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + Constants.mountCommandTimeoutSec, execute: terminate)
+
         process.waitUntilExit()
+        terminate.cancel()
+        ioGroup.wait()
+
+        if timedOut.isSet {
+            throw MounterError.timedOut
+        }
 
         let out = String(data: outData, encoding: .utf8) ?? ""
         if let line = out.split(separator: "\n").first(where: { $0.hasPrefix("rc=") }),
@@ -184,28 +253,43 @@ struct Mounter: MounterProtocol {
         }
     }
 
-    func forceUnmount(mountpoint: String) {
+    @discardableResult
+    func forceUnmount(mountpoint: String) -> Bool {
         let real = Self.resolve(mountpoint)
-        guard MountTable.isMounted(real) else { return }
-        let r1 = Proc.run(Constants.umount, ["-f", real], timeout: 30)
+        guard MountTable.isMounted(real) else { return true }   // already clear
+        let t = Constants.forceUnmountTimeoutSec
+        let r1 = Proc.run(Constants.umount, ["-f", real], timeout: t)
         if r1.exitCode != 0 {
-            log.warn("umount -f \(real) exited \(r1.exitCode): \(r1.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+            log.warn("umount -f \(real) exited \(r1.exitCode)\(r1.timedOut ? " (timed out)" : ""): \(r1.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         if MountTable.isMounted(real) {
             log.warn("\(real) still mounted after umount -f; trying diskutil unmount force")
-            let r2 = Proc.run(Constants.diskutil, ["unmount", "force", real], timeout: 30)
+            let r2 = Proc.run(Constants.diskutil, ["unmount", "force", real], timeout: t)
             if r2.exitCode != 0 {
-                log.warn("diskutil unmount force \(real) exited \(r2.exitCode): \(r2.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+                log.warn("diskutil unmount force \(real) exited \(r2.exitCode)\(r2.timedOut ? " (timed out)" : ""): \(r2.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
             }
         }
+        let cleared = !MountTable.isMounted(real)
+        if !cleared {
+            log.error("\(real) is STILL mounted after force-unmount escalation; the kernel mount is wedged (a reboot may be required to clear it)")
+        }
+        return cleared
     }
 
     func currentMountInfo(mountpoint: String) -> MountInfo? {
         let real = Self.resolve(mountpoint)
         guard let entry = MountTable.entry(forMountpoint: real) else { return nil }
-        var st = stat()
-        guard stat(real, &st) == 0 else { return nil }
+        // Bounded stat: a mount in the table whose stat times out/errors is wedged
+        // or vanishing — there's no healthy baseline to report, so return nil. (Use
+        // `isMounted` when you only need existence, not a device id.)
+        guard case .success(let st) = Prober.statWithTimeout(real, timeout: Constants.statTimeoutSec) else {
+            return nil
+        }
         return MountInfo(deviceID: st.st_dev, fromName: entry.fromName, mountpoint: real)
+    }
+
+    func isMounted(mountpoint: String) -> Bool {
+        MountTable.isMounted(Self.resolve(mountpoint))
     }
 
     // MARK: Helpers

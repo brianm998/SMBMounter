@@ -29,6 +29,23 @@ enum Constants {
     static let lsof       = "/usr/sbin/lsof"
 
     /// Hard ceiling on how long a single `mount_smbfs` invocation may run before
-    /// we kill it (spec §6 / §14: never let the subprocess hang forever).
+    /// we kill it (spec §6 / §14: never let the subprocess hang forever). Also
+    /// bounds the NetFS mount (root path) and the mount-helper subprocess (the
+    /// `local_user` path) so a wedged SMB session can't pin the supervisor's
+    /// serial queue forever.
     static let mountCommandTimeoutSec: TimeInterval = 30
+
+    /// Per-step ceiling for a *force* unmount escalation (`umount -f`, then
+    /// `diskutil unmount force`). A force unmount of a `soft` mount either
+    /// completes promptly or never, so capping each step keeps the supervisor's
+    /// serial queue responsive to control RPCs (`smbmounter unmount`) even while a
+    /// mount is in recovery. Two steps stay well under the daemon's control-RPC
+    /// wait (Daemon.controlUnmount).
+    static let forceUnmountTimeoutSec: TimeInterval = 10
+
+    /// Wall-clock ceiling for a `stat(2)` of a mountpoint we already know is in the
+    /// mount table (baseline capture after a mount, and the adopt-existing check).
+    /// `stat` on a wedged smbfs can block in the kernel; bounding it stops a stale
+    /// mount from stalling the queue.
+    static let statTimeoutSec: TimeInterval = 10
 }

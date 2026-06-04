@@ -12,8 +12,9 @@ struct ProcResult {
     var ok: Bool { exitCode == 0 && !timedOut }
 }
 
-/// Thread-safe one-shot flag.
-private final class AtomicFlag {
+/// Thread-safe one-shot flag. Module-internal so the mount-helper watchdog in
+/// Mounter can reuse the same SIGTERM→SIGKILL timeout machinery.
+final class AtomicFlag {
     private let lock = NSLock()
     private var value = false
     func set() { lock.lock(); value = true; lock.unlock() }
