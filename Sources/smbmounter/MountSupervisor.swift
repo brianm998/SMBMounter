@@ -487,6 +487,12 @@ final class MountSupervisor {
             return rc != 80 && rc != 13
         case .noCredential, .unknownUser, .badURL:
             return false
+        case .mountpointMissing:
+            // Won't fix itself, but retrying is harmless (fails locally, never
+            // touches the server) and auto-mounts the moment the path is restored
+            // (e.g. after fixing /etc/synthetic.conf) — same heal-on-its-own intent
+            // as the cold-boot race.
+            return true
         case .timedOut, .notMountedAfterCommand, .statFailed, .commandFailed:
             return true
         }

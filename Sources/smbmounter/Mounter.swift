@@ -20,6 +20,7 @@ enum MounterError: Error, CustomStringConvertible {
     case noCredential(server: String, account: String)
     case unknownUser(String)
     case badURL(String)
+    case mountpointMissing(path: String)
     case netfs(rc: Int32)
     case commandFailed(exit: Int32, stderr: String)
     case timedOut
@@ -34,12 +35,14 @@ enum MounterError: Error, CustomStringConvertible {
             return "local_user '\(u)' does not exist on this system"
         case .badURL(let s):
             return "could not build a valid smb:// URL from \(s)"
+        case .mountpointMissing(let path):
+            return "mountpoint \(path) does not exist — NetFS cannot mount onto a missing path. Create it first. A root-level path (e.g. /mammoth) lives on the sealed system volume and only persists via /etc/synthetic.conf; add an entry there and run `sudo /System/Library/Filesystems/apfs.fs/Contents/Resources/apfs.util -t` (or reboot)."
         case .netfs(let rc):
             let extra: String
             switch rc {
             case 80: extra = "  (authentication failed — wrong password, or the daemon can't read the keychain item)"
             case 62: extra = "  (ELOOP — mountpoint path contains a symlink; it must be resolved with realpath)"
-            case  2: extra = "  (share not found)"
+            case  2: extra = "  (share not found, or the local mountpoint path does not exist)"
             case 13: extra = "  (permission denied)"
             case 60: extra = "  (timed out)"
             case 64, 65: extra = "  (host down / no route to host — network not up yet?)"
@@ -92,6 +95,20 @@ struct Mounter: MounterProtocol {
     private let log = Log(category: "mounter")
 
     func mount(_ config: MountConfig) throws -> MountInfo {
+        // The mountpoint must already exist; NetFS mounting onto a missing path
+        // returns a bare ENOENT (rc=2) that is indistinguishable from "share not
+        // found", sending diagnosis down the wrong trail. Catch it here with a
+        // precise message. (A root-level mountpoint like /mammoth lives on the
+        // sealed, read-only system volume and only persists via /etc/synthetic.conf,
+        // so it silently vanishes on the next reboot if that entry is lost — which
+        // is exactly this failure.) Safe from hangs: doMount/attemptRecoveryMount
+        // only call mount() once the path is confirmed clear of any live mount.
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: config.mountpoint, isDirectory: &isDir),
+              isDir.boolValue else {
+            throw MounterError.mountpointMissing(path: config.mountpoint)
+        }
+
         let real = Self.resolve(config.mountpoint)
 
         // Read the password from the System keychain (we run as root).
